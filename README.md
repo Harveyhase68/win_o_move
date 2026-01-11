@@ -1,0 +1,2 @@
+# win_o_move
+Restores the WIN+SHIFT+LEFT/RIGHT keyboard shortcut for moving windows across multiple monitors when snap windows (System → Multitasking → Snap windows) is disabled. Of course, you can re-enable the feature and disable all (currently 5) options, but my tool is faster to enable/disable and will likely offer more useful options later like changing the hotkey, maybe a key for restore/maximize a window and so on?!
