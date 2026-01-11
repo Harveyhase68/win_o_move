@@ -380,46 +380,111 @@ fn get_all_monitors() -> Vec<HMONITOR> {
 }
 
 fn create_simple_icon() -> tray_icon::Icon {
-    let size = 16u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    // Icon aus eingebetteter Datei laden
+    let icon_bytes = include_bytes!("../icon.ico");
+    tray_icon::Icon::from_resource(1, None)
+        .or_else(|_| {
+            // Fallback: Versuche aus ICO-Datei zu laden
+            load_icon_from_ico(icon_bytes)
+        })
+        .unwrap_or_else(|_| {
+            // Letzter Fallback: Einfaches blaues Icon
+            let size = 16u32;
+            let rgba = vec![30, 144, 255, 255].repeat((size * size) as usize);
+            tray_icon::Icon::from_rgba(rgba, size, size).unwrap()
+        })
+}
 
-    for y in 0..size {
-        for x in 0..size {
-            let idx = ((y * size + x) * 4) as usize;
+fn load_icon_from_ico(ico_data: &[u8]) -> Result<tray_icon::Icon, Box<dyn std::error::Error>> {
+    // ICO Header: 6 bytes, dann pro Icon-Eintrag 16 bytes
+    if ico_data.len() < 22 {
+        return Err("ICO too small".into());
+    }
 
-            // Hintergrund: Blau
-            rgba[idx] = 30;
-            rgba[idx + 1] = 144;
-            rgba[idx + 2] = 255;
-            rgba[idx + 3] = 255;
+    let num_images = u16::from_le_bytes([ico_data[4], ico_data[5]]) as usize;
+    if num_images == 0 {
+        return Err("No images in ICO".into());
+    }
 
-            // Weißer Doppelpfeil (links-rechts)
-            // Linker Pfeil <
-            if y >= 5 && y <= 10 {
-                let arrow_x = (y as i32 - 7).abs();
-                if x >= 2 && x <= (4 - arrow_x) as u32 {
-                    rgba[idx] = 255;
-                    rgba[idx + 1] = 255;
-                    rgba[idx + 2] = 255;
-                }
-            }
-            // Rechter Pfeil >
-            if y >= 5 && y <= 10 {
-                let arrow_x = (y as i32 - 7).abs();
-                if x >= (11 + arrow_x) as u32 && x <= 13 {
-                    rgba[idx] = 255;
-                    rgba[idx + 1] = 255;
-                    rgba[idx + 2] = 255;
-                }
-            }
-            // Verbindungslinie
-            if y >= 7 && y <= 8 && x >= 4 && x <= 11 {
-                rgba[idx] = 255;
-                rgba[idx + 1] = 255;
-                rgba[idx + 2] = 255;
+    // Suche nach 32x32 oder 16x16 Icon (bevorzugt 32x32)
+    let mut best_entry: Option<(usize, u8, u32, u32)> = None; // (index, size, offset, data_size)
+
+    for i in 0..num_images {
+        let entry_offset = 6 + i * 16;
+        if entry_offset + 16 > ico_data.len() {
+            break;
+        }
+
+        let width = if ico_data[entry_offset] == 0 { 256 } else { ico_data[entry_offset] as u32 };
+        let height = if ico_data[entry_offset + 1] == 0 { 256 } else { ico_data[entry_offset + 1] as u32 };
+        let data_size = u32::from_le_bytes([
+            ico_data[entry_offset + 8],
+            ico_data[entry_offset + 9],
+            ico_data[entry_offset + 10],
+            ico_data[entry_offset + 11],
+        ]);
+        let data_offset = u32::from_le_bytes([
+            ico_data[entry_offset + 12],
+            ico_data[entry_offset + 13],
+            ico_data[entry_offset + 14],
+            ico_data[entry_offset + 15],
+        ]);
+
+        // Bevorzuge 32x32 oder 48x48
+        if width == height && (width == 32 || width == 48 || width == 16) {
+            if best_entry.is_none() || width > best_entry.unwrap().1 as u32 {
+                best_entry = Some((i, width as u8, data_offset, data_size));
             }
         }
     }
 
-    tray_icon::Icon::from_rgba(rgba, size, size).unwrap()
+    let (_, size, offset, data_size) = best_entry.ok_or("No suitable icon size found")?;
+    let offset = offset as usize;
+    let data_size = data_size as usize;
+
+    if offset + data_size > ico_data.len() {
+        return Err("Invalid ICO data".into());
+    }
+
+    let image_data = &ico_data[offset..offset + data_size];
+
+    // Prüfe ob PNG (moderne ICO-Dateien)
+    if image_data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        // PNG - mit image crate decodieren wäre nötig, Fallback verwenden
+        return Err("PNG icons not supported without image crate".into());
+    }
+
+    // BMP/DIB Format
+    let size = size as u32;
+    let bpp = u16::from_le_bytes([image_data[14], image_data[15]]);
+
+    if bpp != 32 {
+        return Err("Only 32bpp icons supported".into());
+    }
+
+    let pixel_offset = 40; // BITMAPINFOHEADER size
+    let row_size = (size * 4) as usize;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+
+    // BMP ist bottom-up, wir brauchen top-down
+    for y in 0..size {
+        let src_y = (size - 1 - y) as usize;
+        let src_offset = pixel_offset + src_y * row_size;
+        let dst_offset = (y * size * 4) as usize;
+
+        for x in 0..size as usize {
+            let src_idx = src_offset + x * 4;
+            let dst_idx = dst_offset + x * 4;
+
+            if src_idx + 3 < image_data.len() {
+                // BGRA -> RGBA
+                rgba[dst_idx] = image_data[src_idx + 2];     // R
+                rgba[dst_idx + 1] = image_data[src_idx + 1]; // G
+                rgba[dst_idx + 2] = image_data[src_idx];     // B
+                rgba[dst_idx + 3] = image_data[src_idx + 3]; // A
+            }
+        }
+    }
+
+    Ok(tray_icon::Icon::from_rgba(rgba, size, size)?)
 }
