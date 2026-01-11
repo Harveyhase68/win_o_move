@@ -20,18 +20,40 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, SetWindowPos, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, HHOOK,
-    KBDLLHOOKSTRUCT, MSG, SWP_FRAMECHANGED, SWP_NOZORDER, WH_KEYBOARD_LL, WM_KEYDOWN, WS_CAPTION,
-    WS_EX_TOOLWINDOW,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, PostMessageW, SendMessageW,
+    SetWindowPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, GA_ROOT, GWL_EXSTYLE,
+    GWL_STYLE, HHOOK, KBDLLHOOKSTRUCT, MSG, SIZE_RESTORED, SWP_FRAMECHANGED, SWP_NOZORDER,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_SIZE, WS_CAPTION, WS_EX_TOOLWINDOW,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcessId, ReleaseMutex,
+};
+use windows::Win32::Foundation::GetLastError;
+use windows::core::PCWSTR;
 
 thread_local! {
     static HOOK_HANDLE: RefCell<HHOOK> = RefCell::new(HHOOK::default());
 }
 
 fn main() {
+    // Mutex erstellen - verhindert mehrere Instanzen (Name muss mit InnoSetup AppMutex übereinstimmen)
+    let mutex_name: Vec<u16> = "winomove\0".encode_utf16().collect();
+    let mutex = unsafe { CreateMutexW(None, true, PCWSTR(mutex_name.as_ptr())) };
+
+    if mutex.is_err() {
+        return; // Konnte Mutex nicht erstellen
+    }
+
+    let mutex = mutex.unwrap();
+
+    // Prüfen ob bereits eine Instanz läuft
+    unsafe {
+        if GetLastError().0 == 183 {
+            // ERROR_ALREADY_EXISTS
+            return; // Bereits eine Instanz aktiv
+        }
+    }
+
     println!("WinOMove gestartet - Win+Shift+Left/Right zum Fenster verschieben");
     println!("Tray-Icon zum Beenden verwenden");
 
@@ -87,6 +109,9 @@ fn main() {
                 let _ = UnhookWindowsHookEx(hook);
             }
         });
+
+        // Mutex freigeben
+        let _ = ReleaseMutex(mutex);
     }
 
     println!("WinOMove beendet");
@@ -241,8 +266,12 @@ fn move_window_to_monitor(direction: Direction) {
             SWP_NOZORDER | SWP_FRAMECHANGED,
         );
 
+        // WM_SIZE senden um das Fenster zum Re-Layout zu zwingen
+        let lparam = ((window_height as u32) << 16) | (window_width as u32 & 0xFFFF);
+        let _ = SendMessageW(hwnd, WM_SIZE, WPARAM(SIZE_RESTORED as usize), LPARAM(lparam as isize));
+
         // Kurz warten damit Windows die Position verarbeiten kann
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(30));
 
         // Fenster neu zeichnen lassen
         let _ = RedrawWindow(
@@ -252,14 +281,8 @@ fn move_window_to_monitor(direction: Direction) {
             RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         );
 
-        // Nochmal kurz warten und ein zweites Mal neu zeichnen (für hartnäckige Fenster)
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let _ = RedrawWindow(
-            hwnd,
-            None,
-            None,
-            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
-        );
+        // Nochmal WM_SIZE posten (async) für hartnäckige Fenster
+        let _ = PostMessageW(hwnd, WM_SIZE, WPARAM(SIZE_RESTORED as usize), LPARAM(lparam as isize));
     }
 }
 
